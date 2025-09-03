@@ -1,0 +1,106 @@
+name: Optimize images
+
+on:
+  push:
+    paths:
+      - "images/**"
+      - ".github/workflows/image-optimizer.yml"
+  pull_request:
+    paths:
+      - "images/**"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  optimize:
+    runs-on: ubuntu-latest
+
+    env:
+      IMAGE_DIRS: "images"
+      # Target widths for responsive variants
+      SIZES: "480 960 1440 1920"
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Squoosh CLI
+        run: |
+          npm i -g @squoosh/cli
+
+      - name: Optimize and generate variants
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          shopt -s globstar nullglob
+
+          CHANGED=0
+
+          # find target folders that actually exist
+          for DIR in $IMAGE_DIRS; do
+            [ -d "$DIR" ] || continue
+
+            echo "Processing dir: $DIR"
+
+            # Process JPG/PNG (skip already-optimized webp/avif/svg)
+            for SRC in "$DIR"/**/*.{jpg,jpeg,png,JPG,JPEG,PNG}; do
+              [ -f "$SRC" ] || continue
+
+              BASENAME="${SRC%.*}"         # without extension
+              EXT="${SRC##*.}"
+              EXTLC="$(echo "$EXT" | tr '[:upper:]' '[:lower:]')"
+
+              # 1) Recompress originals (keep same format)
+              #    For JPEG use mozjpeg, for PNG use oxipng
+              if [[ "$EXTLC" == "jpg" || "$EXTLC" == "jpeg" ]]; then
+                npx --yes @squoosh/cli --mozjpeg '{}' "$SRC" -d "$(dirname "$SRC")" -o "$(basename "$BASENAME")-opt.jpg"
+                if [ -f "${BASENAME}-opt.jpg" ]; then
+                  mv "${BASENAME}-opt.jpg" "$SRC"
+                  CHANGED=1
+                fi
+              elif [[ "$EXTLC" == "png" ]]; then
+                npx --yes @squoosh/cli --oxipng '{}' "$SRC" -d "$(dirname "$SRC")" -o "$(basename "$BASENAME")-opt.png"
+                if [ -f "${BASENAME}-opt.png" ]; then
+                  mv "${BASENAME}-opt.png" "$SRC"
+                  CHANGED=1
+                fi
+              fi
+
+              # 2) Generate responsive WebP & AVIF variants
+              for W in $SIZES; do
+                OUT_WEBP="${BASENAME}-${W}.webp"
+                OUT_AVIF="${BASENAME}-${W}.avif"
+
+                # Only (re)create if missing to keep diffs minimal
+                if [ ! -f "$OUT_WEBP" ]; then
+                  npx --yes @squoosh/cli --resize "{\"width\":$W}" --webp "{}" "$SRC" -d "$(dirname "$SRC")" -o "$(basename "$BASENAME")-${W}.webp"
+                  CHANGED=1
+                fi
+                if [ ! -f "$OUT_AVIF" ]; then
+                  npx --yes @squoosh/cli --resize "{\"width\":$W}" --avif "{}" "$SRC" -d "$(dirname "$SRC")" -o "$(basename "$BASENAME")-${W}.avif"
+                  CHANGED=1
+                fi
+              done
+            done
+          done
+
+          echo "changed=$CHANGED" >> $GITHUB_OUTPUT
+        id: optimize
+
+      - name: Commit optimized images
+        if: steps.optimize.outputs.changed == '1'
+        uses: EndBug/add-and-commit@v9
+        with:
+          add: "."
+          message: "chore(images): optimize & generate responsive variants [skip ci]"
+          default_author: github_actions
