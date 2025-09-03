@@ -19,7 +19,6 @@ jobs:
 
     env:
       IMAGE_DIRS: "images"
-      # Target widths for responsive variants
       SIZES: "480 960 1440 1920"
 
     steps:
@@ -31,83 +30,98 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 18
+          node-version: 20
 
-      - name: Install Squoosh CLI
-        run: npm i -g @squoosh/cli
+      - name: Install deps
+        run: |
+          npm init -y >/dev/null 2>&1 || true
+          npm i sharp@^0.33.0 globby@^14.0.1
 
       - name: Optimize and generate variants
         id: optimize
-        shell: bash
         run: |
-          set -euo pipefail
-          shopt -s globstar nullglob
+          node - <<'NODE'
+          import { globby } from 'globby';
+          import sharp from 'sharp';
+          import fs from 'node:fs/promises';
+          import path from 'node:path';
 
-          CHANGED=0
+          const IMAGE_DIRS = (process.env.IMAGE_DIRS || '').split(/\s+/).filter(Boolean);
+          const SIZES = (process.env.SIZES || '480 960 1440 1920').split(/\s+/).map(s => parseInt(s,10)).filter(Boolean);
 
-          for DIR in $IMAGE_DIRS; do
-            [ -d "$DIR" ] || continue
-            echo "Processing dir: $DIR"
+          let changed = 0;
 
-            for SRC in "$DIR"/**/*.{jpg,jpeg,png,JPG,JPEG,PNG}; do
-              [ -f "$SRC" ] || continue
+          const exists = async p => !!(await fs.stat(p).catch(()=>null));
 
-              DIRNAME="$(dirname "$SRC")"
-              FILENAME="$(basename "$SRC")"      # e.g. photo.jpg
-              NAME="${FILENAME%.*}"              # e.g. photo
-              EXTLC="$(echo "${SRC##*.}" | tr '[:upper:]' '[:lower:]')"
+          const recompressOriginal = async (src) => {
+            const ext = path.extname(src).toLowerCase();
+            const tmp = src + '.tmp';
+            const img = sharp(src, { failOn: 'none' });
 
-              # temp output dir to avoid clobbering
-              OUTDIR="$DIRNAME/.squoosh-out"
-              mkdir -p "$OUTDIR"
+            if (ext === '.jpg' || ext === '.jpeg') {
+              await img.jpeg({ quality: 80, mozjpeg: true }).toFile(tmp);
+            } else if (ext === '.png') {
+              await img.png({ compressionLevel: 9, palette: true }).toFile(tmp);
+            } else {
+              return; // skip others
+            }
 
-              # 1) Recompress original (keeps same format)
-              if [[ "$EXTLC" == "jpg" || "$EXTLC" == "jpeg" ]]; then
-                # input FIRST, then options
-                npx --yes @squoosh/cli "$SRC" --mozjpeg '{}' --output-dir "$OUTDIR"
-                if [ -f "$OUTDIR/$NAME.jpg" ]; then
-                  mv "$OUTDIR/$NAME.jpg" "$SRC"
-                  CHANGED=1
-                fi
-              elif [[ "$EXTLC" == "png" ]]; then
-                npx --yes @squoosh/cli "$SRC" --oxipng '{}' --output-dir "$OUTDIR"
-                if [ -f "$OUTDIR/$NAME.png" ]; then
-                  mv "$OUTDIR/$NAME.png" "$SRC"
-                  CHANGED=1
-                fi
-              fi
+            // Only replace if tmp is smaller (avoid churn)
+            const [a, b] = await Promise.all([fs.stat(src), fs.stat(tmp)]);
+            if (b.size < a.size) {
+              await fs.rename(tmp, src);
+              changed = 1;
+            } else {
+              await fs.rm(tmp, { force: true });
+            }
+          };
 
-              # 2) Generate responsive WebP & AVIF with width suffixes
-              for W in $SIZES; do
-                OUT_WEBP="$DIRNAME/${NAME}-${W}.webp"
-                OUT_AVIF="$DIRNAME/${NAME}-${W}.avif"
+          const genVariant = async (src, w, format) => {
+            const dir = path.dirname(src);
+            const name = path.basename(src, path.extname(src));
+            const out = path.join(dir, `${name}-${w}.${format}`);
 
-                # Create missing variants (both formats at once with --suffix)
-                if [ ! -f "$OUT_WEBP" ] || [ ! -f "$OUT_AVIF" ]; then
-                  npx --yes @squoosh/cli "$SRC" \
-                    --resize "{\"width\":$W}" \
-                    --webp "{}" \
-                    --avif "{}" \
-                    --suffix "-$W" \
-                    --output-dir "$OUTDIR"
-                fi
+            if (await exists(out)) return;
 
-                if [ ! -f "$OUT_WEBP" ] && [ -f "$OUTDIR/${NAME}-${W}.webp" ]; then
-                  mv "$OUTDIR/${NAME}-${W}.webp" "$OUT_WEBP"
-                  CHANGED=1
-                fi
-                if [ ! -f "$OUT_AVIF" ] && [ -f "$OUTDIR/${NAME}-${W}.avif" ]; then
-                  mv "$OUTDIR/${NAME}-${W}.avif" "$OUT_AVIF"
-                  CHANGED=1
-                fi
-              done
+            const base = sharp(src, { failOn: 'none' }).resize({ width: w, withoutEnlargement: true });
 
-              # cleanup temp dir if empty
-              rmdir "$OUTDIR" 2>/dev/null || true
-            done
-          done
+            if (format === 'webp') {
+              await base.webp({ quality: 80, effort: 4 }).toFile(out);
+            } else if (format === 'avif') {
+              await base.avif({ quality: 50, effort: 4 }).toFile(out);
+            }
+            changed = 1;
+          };
 
-          echo "changed=$CHANGED" >> "$GITHUB_OUTPUT"
+          const patterns = [];
+          for (const d of IMAGE_DIRS) {
+            patterns.push(`${d.replace(/\/+$/,'')}/**/*.{jpg,jpeg,png,JPG,JPEG,PNG}`);
+          }
+
+          const files = await globby(patterns, { dot: false, onlyFiles: true });
+          if (!files.length) {
+            console.log('No images found.');
+          }
+
+          for (const src of files) {
+            console.log('Processing:', src);
+            try {
+              await recompressOriginal(src);
+              for (const w of SIZES) {
+                await Promise.all([
+                  genVariant(src, w, 'webp'),
+                  genVariant(src, w, 'avif'),
+                ]);
+              }
+            } catch (err) {
+              console.error('Error on', src, err);
+            }
+          }
+
+          // Report back to GitHub Actions
+          console.log('changed='+changed);
+          await fs.appendFile(process.env.GITHUB_OUTPUT, `changed=${changed}\n`);
+          NODE
 
       - name: Commit optimized images
         if: steps.optimize.outputs.changed == '1'
