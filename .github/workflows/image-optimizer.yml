@@ -34,68 +34,80 @@ jobs:
           node-version: 20
 
       - name: Install Squoosh CLI
-        run: |
-          npm i -g @squoosh/cli
+        run: npm i -g @squoosh/cli
 
       - name: Optimize and generate variants
+        id: optimize
         shell: bash
         run: |
           set -euo pipefail
-
           shopt -s globstar nullglob
 
           CHANGED=0
 
-          # find target folders that actually exist
           for DIR in $IMAGE_DIRS; do
             [ -d "$DIR" ] || continue
-
             echo "Processing dir: $DIR"
 
-            # Process JPG/PNG (skip already-optimized webp/avif/svg)
             for SRC in "$DIR"/**/*.{jpg,jpeg,png,JPG,JPEG,PNG}; do
               [ -f "$SRC" ] || continue
 
-              BASENAME="${SRC%.*}"         # without extension
-              EXT="${SRC##*.}"
-              EXTLC="$(echo "$EXT" | tr '[:upper:]' '[:lower:]')"
+              DIRNAME="$(dirname "$SRC")"
+              FILENAME="$(basename "$SRC")"      # e.g. photo.jpg
+              NAME="${FILENAME%.*}"              # e.g. photo
+              EXTLC="$(echo "${SRC##*.}" | tr '[:upper:]' '[:lower:]')"
 
-              # 1) Recompress originals (keep same format)
-              #    For JPEG use mozjpeg, for PNG use oxipng
+              # temp output dir to avoid clobbering
+              OUTDIR="$DIRNAME/.squoosh-out"
+              mkdir -p "$OUTDIR"
+
+              # 1) Recompress original (keeps same format)
               if [[ "$EXTLC" == "jpg" || "$EXTLC" == "jpeg" ]]; then
-                npx --yes @squoosh/cli --mozjpeg '{}' "$SRC" -d "$(dirname "$SRC")" -o "$(basename "$BASENAME")-opt.jpg"
-                if [ -f "${BASENAME}-opt.jpg" ]; then
-                  mv "${BASENAME}-opt.jpg" "$SRC"
+                # input FIRST, then options
+                npx --yes @squoosh/cli "$SRC" --mozjpeg '{}' --output-dir "$OUTDIR"
+                if [ -f "$OUTDIR/$NAME.jpg" ]; then
+                  mv "$OUTDIR/$NAME.jpg" "$SRC"
                   CHANGED=1
                 fi
               elif [[ "$EXTLC" == "png" ]]; then
-                npx --yes @squoosh/cli --oxipng '{}' "$SRC" -d "$(dirname "$SRC")" -o "$(basename "$BASENAME")-opt.png"
-                if [ -f "${BASENAME}-opt.png" ]; then
-                  mv "${BASENAME}-opt.png" "$SRC"
+                npx --yes @squoosh/cli "$SRC" --oxipng '{}' --output-dir "$OUTDIR"
+                if [ -f "$OUTDIR/$NAME.png" ]; then
+                  mv "$OUTDIR/$NAME.png" "$SRC"
                   CHANGED=1
                 fi
               fi
 
-              # 2) Generate responsive WebP & AVIF variants
+              # 2) Generate responsive WebP & AVIF with width suffixes
               for W in $SIZES; do
-                OUT_WEBP="${BASENAME}-${W}.webp"
-                OUT_AVIF="${BASENAME}-${W}.avif"
+                OUT_WEBP="$DIRNAME/${NAME}-${W}.webp"
+                OUT_AVIF="$DIRNAME/${NAME}-${W}.avif"
 
-                # Only (re)create if missing to keep diffs minimal
-                if [ ! -f "$OUT_WEBP" ]; then
-                  npx --yes @squoosh/cli --resize "{\"width\":$W}" --webp "{}" "$SRC" -d "$(dirname "$SRC")" -o "$(basename "$BASENAME")-${W}.webp"
+                # Create missing variants (both formats at once with --suffix)
+                if [ ! -f "$OUT_WEBP" ] || [ ! -f "$OUT_AVIF" ]; then
+                  npx --yes @squoosh/cli "$SRC" \
+                    --resize "{\"width\":$W}" \
+                    --webp "{}" \
+                    --avif "{}" \
+                    --suffix "-$W" \
+                    --output-dir "$OUTDIR"
+                fi
+
+                if [ ! -f "$OUT_WEBP" ] && [ -f "$OUTDIR/${NAME}-${W}.webp" ]; then
+                  mv "$OUTDIR/${NAME}-${W}.webp" "$OUT_WEBP"
                   CHANGED=1
                 fi
-                if [ ! -f "$OUT_AVIF" ]; then
-                  npx --yes @squoosh/cli --resize "{\"width\":$W}" --avif "{}" "$SRC" -d "$(dirname "$SRC")" -o "$(basename "$BASENAME")-${W}.avif"
+                if [ ! -f "$OUT_AVIF" ] && [ -f "$OUTDIR/${NAME}-${W}.avif" ]; then
+                  mv "$OUTDIR/${NAME}-${W}.avif" "$OUT_AVIF"
                   CHANGED=1
                 fi
               done
+
+              # cleanup temp dir if empty
+              rmdir "$OUTDIR" 2>/dev/null || true
             done
           done
 
-          echo "changed=$CHANGED" >> $GITHUB_OUTPUT
-        id: optimize
+          echo "changed=$CHANGED" >> "$GITHUB_OUTPUT"
 
       - name: Commit optimized images
         if: steps.optimize.outputs.changed == '1'
