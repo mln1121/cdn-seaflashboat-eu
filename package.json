@@ -8,9 +8,9 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "description": "",
   "dependencies": {
     "globby": "^14.1.0",
     "sharp": "^0.33.5"
-  }
+  },
+  "description": ""
 }
