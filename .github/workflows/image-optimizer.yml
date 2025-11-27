@@ -3,11 +3,11 @@ name: Optimize images
 on:
   push:
     paths:
-      - "images/**"
+      - "imgs/**"
       - ".github/workflows/image-optimizer.yml"
   pull_request:
     paths:
-      - "images/**"
+      - "imgs/**"
   workflow_dispatch:
 
 permissions:
@@ -18,7 +18,8 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      IMAGE_DIRS: "images"
+      SOURCE_DIR: "imgs"
+      TARGET_DIR: "images"
       SIZES: "480 960 1440 1920"
 
     steps:
@@ -37,30 +38,56 @@ jobs:
           npm init -y >/dev/null 2>&1 || true
           npm i sharp@^0.33.0 globby@^14.0.1
 
-      - name: Optimize and generate variants
+      - name: Copy originals and generate variants
         id: optimize
         run: |
-          node - <<'NODE'
+          node --input-type=module - <<'NODE'
           import { globby } from 'globby';
           import sharp from 'sharp';
           import fs from 'node:fs/promises';
           import path from 'node:path';
 
-          const IMAGE_DIRS = (process.env.IMAGE_DIRS || '').split(/\s+/).filter(Boolean);
-          const SIZES = (process.env.SIZES || '480 960 1440 1920').split(/\s+/).map(s => parseInt(s,10)).filter(Boolean);
+          const SOURCE_DIR = (process.env.SOURCE_DIR || 'imgs').replace(/\/+$/,'');
+          const TARGET_DIR = (process.env.TARGET_DIR || 'images').replace(/\/+$/,'');
+          const SIZES = (process.env.SIZES || '480 960 1440 1920')
+            .split(/\s+/)
+            .map(s => parseInt(s, 10))
+            .filter(Boolean);
 
           let changed = 0;
 
-          const exists = async p => !!(await fs.stat(p).catch(()=>null));
+          const exists = async p => !!(await fs.stat(p).catch(() => null));
 
-          const genVariant = async (src, w, format) => {
-            const dir = path.dirname(src);
-            const name = path.basename(src, path.extname(src));
-            const out = path.join(dir, `${name}-${w}.${format}`);
+          const ensureTargetDir = async (src) => {
+            const rel = path.relative(SOURCE_DIR, src);
+            const relDir = path.dirname(rel);
+            const targetDir = path.join(TARGET_DIR, relDir === '.' ? '' : relDir);
+            await fs.mkdir(targetDir, { recursive: true });
+            return { rel, targetDir };
+          };
+
+          const copyOriginal = async (src) => {
+            const { targetDir } = await ensureTargetDir(src);
+            const fileName = path.basename(src);
+            const out = path.join(targetDir, fileName);
 
             if (await exists(out)) return;
 
-            const base = sharp(src, { failOn: 'none' }).resize({ width: w, withoutEnlargement: true });
+            await fs.copyFile(src, out);
+            changed = 1;
+          };
+
+          const genVariant = async (src, w, format) => {
+            const { targetDir } = await ensureTargetDir(src);
+            const name = path.basename(src, path.extname(src));
+            const out = path.join(targetDir, `${name}-${w}.${format}`);
+
+            if (await exists(out)) return;
+
+            const base = sharp(src, { failOn: 'none' }).resize({
+              width: w,
+              withoutEnlargement: true,
+            });
 
             if (format === 'webp') {
               await base.webp({ quality: 100, effort: 4 }).toFile(out);
@@ -70,19 +97,20 @@ jobs:
             changed = 1;
           };
 
-          const patterns = [];
-          for (const d of IMAGE_DIRS) {
-            patterns.push(`${d.replace(/\/+$/,'')}/**/*.{jpg,jpeg,png,JPG,JPEG,PNG}`);
-          }
+          const patterns = [
+            `${SOURCE_DIR}/**/*.{jpg,jpeg,JPG,JPEG}`,
+          ];
 
           const files = await globby(patterns, { dot: false, onlyFiles: true });
           if (!files.length) {
-            console.log('No images found.');
+            console.log('No images found in', SOURCE_DIR);
           }
 
           for (const src of files) {
             console.log('Processing:', src);
             try {
+              await copyOriginal(src);
+
               for (const w of SIZES) {
                 await Promise.all([
                   genVariant(src, w, 'webp'),
@@ -94,8 +122,7 @@ jobs:
             }
           }
 
-          // Report back to GitHub Actions
-          console.log('changed='+changed);
+          console.log('changed=' + changed);
           await fs.appendFile(process.env.GITHUB_OUTPUT, `changed=${changed}\n`);
           NODE
 
@@ -103,6 +130,8 @@ jobs:
         if: steps.optimize.outputs.changed == '1'
         uses: EndBug/add-and-commit@v9
         with:
-          add: "."
-          message: "chore(images): optimize & generate responsive variants [skip ci]"
+          add: |
+            imgs/**
+            images/**
+          message: "chore(images): copy originals & generate responsive variants [skip ci]"
           default_author: github_actions
