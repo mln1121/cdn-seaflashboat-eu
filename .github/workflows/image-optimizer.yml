@@ -1,13 +1,6 @@
 name: Optimize images
 
 on:
-  push:
-    paths:
-      - "images/**/*.{jpg,jpeg,JPG,JPEG}"
-      - ".github/workflows/image-optimizer.yml"
-  pull_request:
-    paths:
-      - "images/**/*.{jpg,jpeg,JPG,JPEG}"
   workflow_dispatch:
 
 permissions:
