@@ -59,7 +59,7 @@ jobs:
             const img = sharp(src, { failOn: 'none' });
 
             if (ext === '.jpg' || ext === '.jpeg') {
-              await img.jpeg({ quality: 80, mozjpeg: true }).toFile(tmp);
+              await img.jpeg({ quality: 100, mozjpeg: true }).toFile(tmp);
             } else if (ext === '.png') {
               await img.png({ compressionLevel: 9, palette: true }).toFile(tmp);
             } else {
@@ -86,9 +86,9 @@ jobs:
             const base = sharp(src, { failOn: 'none' }).resize({ width: w, withoutEnlargement: true });
 
             if (format === 'webp') {
-              await base.webp({ quality: 80, effort: 4 }).toFile(out);
+              await base.webp({ quality: 90, effort: 4 }).toFile(out);
             } else if (format === 'avif') {
-              await base.avif({ quality: 50, effort: 4 }).toFile(out);
+              await base.avif({ quality: 90, effort: 4 }).toFile(out);
             }
             changed = 1;
           };
@@ -106,7 +106,7 @@ jobs:
           for (const src of files) {
             console.log('Processing:', src);
             try {
-              await recompressOriginal(src);
+              // await recompressOriginal(src);
               for (const w of SIZES) {
                 await Promise.all([
                   genVariant(src, w, 'webp'),
